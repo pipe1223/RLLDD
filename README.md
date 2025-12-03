@@ -1,13 +1,7 @@
 # Latent-Space Dataset Distillation with Reinforcement Learning
 
 This project explores **dataset distillation in latent space** combined with **reinforcement learning (RL)**.  
-The aim is to study whether **RL can help shape synthetic prototypes** in a latent feature space to match or beat strong baselines such as:
-
-- Full training set in latent space (upper bound)
-- Random latent subset
-- k-means centroids in latent space
-- Latent prototypes trained with a fixed loss schedule (no RL)
-
+The aim is to study whether **RL can help shape synthetic prototypes** in a latent feature space to match or beat strong baselines.
 
 ---
 
