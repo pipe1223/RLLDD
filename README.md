@@ -8,7 +8,6 @@ The aim is to study whether **RL can help shape synthetic prototypes** in a late
 - k-means centroids in latent space
 - Latent prototypes trained with a fixed loss schedule (no RL)
 
-The code is organized to be **research-friendly**, so you can plug parts into a paper or extend experiments easily.
 
 ---
 
