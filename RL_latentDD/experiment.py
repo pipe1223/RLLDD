@@ -10,6 +10,7 @@ This encourages research-grade hygiene for benchmarking and ablations.
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
@@ -111,6 +112,13 @@ def dataset_name_choices() -> Iterable[str]:
     return ["cifar10", "cifar100", "custom"]
 
 
-def prepare_output_dir(base_dir: str | Path, dataset: str, backbone: str) -> Path:
-    timestamped = ensure_dir(Path(base_dir) / dataset / backbone)
+def prepare_output_dir(base_dir: str | Path, dataset: str, backbone: str, run_name: str | None = None) -> Path:
+    """Create a unique directory for a single experiment run.
+
+    A timestamped directory avoids overwriting previous runs unless a custom
+    run_name is provided (e.g., when coordinating sweeps programmatically).
+    """
+
+    suffix = run_name or datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    timestamped = ensure_dir(Path(base_dir) / dataset / backbone / suffix)
     return timestamped

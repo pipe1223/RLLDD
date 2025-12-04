@@ -1,6 +1,7 @@
 # main.py
 
 import argparse
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -46,7 +47,7 @@ from experiment import (
     load_dataset,
     prepare_output_dir,
 )
-from utils import set_seed, get_device, save_experiment_report
+from utils import ensure_dir, set_seed, get_device, save_experiment_report
 from models import (
     ConvAEClassifier,
     LatentPrototypeModel,
@@ -78,12 +79,27 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Latent DD with flexible backbones and datasets")
     parser.add_argument("--dataset", choices=list(dataset_name_choices()), default=DEFAULT_DATASET)
     parser.add_argument("--backbone", choices=list(backbone_name_choices()), default=DEFAULT_BACKBONE)
+    parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument("--latent-dim", type=int, default=AE_LATENT_DIM, help="Latent dimensionality for AE")
+    parser.add_argument("--ae-epochs", type=int, default=AE_EPOCHS, help="Number of epochs for AE pretraining")
     parser.add_argument("--data-root", default="./data", help="Root directory for torchvision datasets")
     parser.add_argument("--custom-train-dir", help="Path to custom training images (ImageFolder compatible)")
     parser.add_argument("--custom-test-dir", help="Path to custom test images (ImageFolder compatible)")
     parser.add_argument("--val-fraction", type=float, default=0.1, help="Validation split fraction for AE training")
     parser.add_argument("--max-train-points", type=int, default=MAX_TRAIN_POINTS, help="Cap latent pool size")
     parser.add_argument("--override-image-size", type=int, default=None, help="Force resize for custom datasets")
+    parser.add_argument("--run-name", type=str, default=None, help="Optional run name for results folder")
+    parser.add_argument("--m-per-class", type=int, default=M_PER_CLASS, help="Number of prototypes per class")
+    parser.add_argument("--sel-budget-per-class", type=int, default=SEL_BUDGET_PER_CLASS)
+    parser.add_argument("--proto-steps-base", type=int, default=PROTO_STEPS_BASE)
+    parser.add_argument("--proto-steps-rl-episode", type=int, default=PROTO_STEPS_RL_EPISODE)
+    parser.add_argument("--sel-episodes", type=int, default=SEL_EPISODES)
+    parser.add_argument("--sel-gamma", type=float, default=SEL_GAMMA)
+    parser.add_argument("--sel-lr", type=float, default=SEL_LR)
+    parser.add_argument("--proto-rl-episodes", type=int, default=PROTO_RL_EPISODES)
+    parser.add_argument("--proto-rl-gamma", type=float, default=PROTO_RL_GAMMA)
+    parser.add_argument("--proto-rl-lr", type=float, default=PROTO_RL_LR)
+    parser.add_argument("--critic-weight", type=float, default=CRITIC_WEIGHT)
     parser.add_argument("--ae-batch-size", type=int, default=DEFAULT_AE_BATCH_SIZE, help="Batch size for AE pretraining")
     parser.add_argument("--num-workers", type=int, default=DEFAULT_NUM_WORKERS, help="DataLoader worker processes")
     parser.add_argument("--results-dir", type=str, default=RESULTS_DIR, help="Where to store structured reports/artifacts")
@@ -100,9 +116,23 @@ def build_backbone(name: str, latent_dim: int, num_classes: int, img_size: int):
 
 def main():
     args = parse_args()
-    set_seed(SEED)
+    set_seed(args.seed)
     device = get_device()
     print("Using device:", device)
+
+    sel_budget_per_class = args.sel_budget_per_class
+    m_per_class = args.m_per_class
+    proto_steps_base = args.proto_steps_base
+    proto_steps_rl_episode = args.proto_steps_rl_episode
+    sel_episodes = args.sel_episodes
+    sel_gamma = args.sel_gamma
+    sel_lr = args.sel_lr
+    proto_rl_episodes = args.proto_rl_episodes
+    proto_rl_gamma = args.proto_rl_gamma
+    proto_rl_lr = args.proto_rl_lr
+    critic_weight = args.critic_weight
+    ae_epochs = args.ae_epochs
+    latent_dim_cfg = args.latent_dim
 
     data_cfg = DataConfig(
         name=args.dataset,
@@ -113,7 +143,7 @@ def main():
         max_train_points=args.max_train_points,
         override_image_size=args.override_image_size,
     )
-    backbone_cfg = BackboneConfig(name=args.backbone, latent_dim=AE_LATENT_DIM)
+    backbone_cfg = BackboneConfig(name=args.backbone, latent_dim=latent_dim_cfg)
     loader_cfg = LoaderConfig(batch_size=args.ae_batch_size, num_workers=args.num_workers)
 
     transform, resolved_size = build_transforms(backbone_cfg, args.override_image_size or DEFAULT_IMAGE_SIZE)
@@ -123,7 +153,7 @@ def main():
     train_size = len(full_train_dataset) - val_size
     if train_size <= num_classes:
         raise ValueError("Training split too small; reduce val_fraction or use a larger dataset.")
-    g = torch.Generator().manual_seed(SEED)
+    g = torch.Generator().manual_seed(args.seed)
     train_dataset, val_dataset = random_split(full_train_dataset, [train_size, val_size], generator=g)
 
     train_loader = DataLoader(
@@ -142,7 +172,7 @@ def main():
     )
 
     metadata = ExperimentMetadata(
-        seed=SEED,
+        seed=args.seed,
         num_classes=num_classes,
         image_size=resolved_size,
         backbone=backbone_cfg,
@@ -151,14 +181,17 @@ def main():
     )
     print("\n[CONFIG]", metadata.as_dict())
 
-    ae_cls = build_backbone(args.backbone, AE_LATENT_DIM, num_classes, resolved_size)
+    output_dir = prepare_output_dir(args.results_dir, args.dataset, args.backbone, run_name=args.run_name)
+    ensure_dir(output_dir)
+
+    ae_cls = build_backbone(args.backbone, latent_dim_cfg, num_classes, resolved_size)
     print("Training AE+classifier...")
     train_ae_classifier(
         model=ae_cls,
         train_loader=train_loader,
         val_loader=val_loader,
         device=device,
-        epochs=AE_EPOCHS,
+        epochs=ae_epochs,
         lr=1e-3,
         alpha_cls=1.0,
     )
@@ -198,7 +231,7 @@ def main():
         train_y_pool = train_y_all
 
     latent_dim = train_z_pool.size(1)
-    if SEL_BUDGET_PER_CLASS * num_classes > train_z_pool.size(0):
+    if sel_budget_per_class * num_classes > train_z_pool.size(0):
         raise ValueError("Selection budget exceeds available latent pool; reduce SEL_BUDGET_PER_CLASS or max_train_points.")
 
     # --- Full-latent baseline (upper bound) ---
@@ -224,7 +257,7 @@ def main():
         train_y=train_y_pool,
         test_z=test_latents,
         test_y=test_labels,
-        budget_per_class=SEL_BUDGET_PER_CLASS,
+        budget_per_class=sel_budget_per_class,
         num_classes=num_classes,
         device=device,
         classifier_epochs=CLASSIFIER_EPOCHS_EVAL,
@@ -238,11 +271,11 @@ def main():
         train_y=train_y_pool,
         test_z=test_latents,
         test_y=test_labels,
-        budget_per_class=SEL_BUDGET_PER_CLASS,
+        budget_per_class=sel_budget_per_class,
         num_classes=num_classes,
         device=device,
         classifier_epochs=CLASSIFIER_EPOCHS_EVAL,
-        kmeans_seed=SEED,
+        kmeans_seed=args.seed,
     )
     print(f"k-means centroids test acc: {kmeans_acc:.4f}")
 
@@ -254,7 +287,7 @@ def main():
         val_z=val_z,
         val_y=val_y,
         num_classes=num_classes,
-        budget_per_class=SEL_BUDGET_PER_CLASS,
+        budget_per_class=sel_budget_per_class,
         device=device,
         classifier_epochs=CLASSIFIER_EPOCHS_RL_REWARD,
         train_latent_classifier_fn=train_latent_classifier,
@@ -266,9 +299,9 @@ def main():
         env=sel_env,
         policy=sel_policy,
         device=device,
-        n_episodes=SEL_EPISODES,
-        gamma=SEL_GAMMA,
-        lr=SEL_LR,
+        n_episodes=sel_episodes,
+        gamma=sel_gamma,
+        lr=sel_lr,
         print_every=PRINT_EVERY_SEL,
         desc="RL-Select",
     )
@@ -280,7 +313,7 @@ def main():
         val_z=val_z,
         val_y=val_y,
         num_classes=num_classes,
-        budget_per_class=SEL_BUDGET_PER_CLASS,
+        budget_per_class=sel_budget_per_class,
         device=device,
         classifier_epochs=CLASSIFIER_EPOCHS_RL_REWARD,
         train_latent_classifier_fn=train_latent_classifier,
@@ -312,7 +345,7 @@ def main():
     proto_base = LatentPrototypeModel(
         num_classes=num_classes,
         latent_dim=latent_dim,
-        m_per_class=M_PER_CLASS,
+        m_per_class=m_per_class,
     )
     init_prototypes_from_data(proto_base, train_z_pool, train_y_pool)
     train_prototypes_baseline(
@@ -322,10 +355,10 @@ def main():
         val_z=val_z,
         val_y=val_y,
         device=device,
-        n_steps=PROTO_STEPS_BASE,
+        n_steps=proto_steps_base,
         batch_size_real=BATCH_SIZE_REAL_BASE,
-        lambda_real=1.0,
-        lambda_div=0.5,
+        lambda_real=BASE_LAMBDA_REAL,
+        lambda_div=BASE_LAMBDA_DIV,
         lr=1e-3,
         weight_decay=1e-4,
         print_every=100,
@@ -352,8 +385,8 @@ def main():
         val_y=val_y,
         num_classes=num_classes,
         latent_dim=latent_dim,
-        m_per_class=M_PER_CLASS,
-        steps_per_episode=PROTO_STEPS_RL_EPISODE,
+        m_per_class=m_per_class,
+        steps_per_episode=proto_steps_rl_episode,
         device=device,
         lr=5e-4,
         weight_decay=1e-4,
@@ -369,14 +402,14 @@ def main():
         env=proto_env,
         ac_net=ac_proto,
         device=device,
-        n_episodes=PROTO_RL_EPISODES,
-        gamma=PROTO_RL_GAMMA,
-        lr=PROTO_RL_LR,
-        critic_weight=CRITIC_WEIGHT,
+        n_episodes=proto_rl_episodes,
+        gamma=proto_rl_gamma,
+        lr=proto_rl_lr,
+        critic_weight=critic_weight,
         print_every=PRINT_EVERY_PROTO_RL,
     )
 
-    plot_proto_action_usage(action_counts, filename="proto_rl_actions_over_steps.png")
+    plot_proto_action_usage(action_counts, filename=str(Path(output_dir) / "proto_rl_actions_over_steps.png"))
 
     print("\nRunning greedy prototype-shaping episode with learned Actor–Critic policy (fine-tune)...")
     proto_eval_env = ProtoUpdateEnv(
@@ -386,8 +419,8 @@ def main():
         val_y=val_y,
         num_classes=num_classes,
         latent_dim=latent_dim,
-        m_per_class=M_PER_CLASS,
-        steps_per_episode=PROTO_STEPS_RL_EPISODE,
+        m_per_class=m_per_class,
+        steps_per_episode=proto_steps_rl_episode,
         device=device,
         lr=5e-4,
         weight_decay=1e-4,
@@ -416,9 +449,9 @@ def main():
         base_proto_imgs = ae_cls.decode(base_protos_flat)
     show_and_save_grid(
         images=base_proto_imgs.cpu(),
-        filename="prototypes_baseline_decoded.png",
+        filename=str(Path(output_dir) / "prototypes_baseline_decoded.png"),
         title="Decoded prototypes (baseline, fixed loss weights)",
-        nrow=M_PER_CLASS,
+        nrow=m_per_class,
     )
 
     with torch.no_grad():
@@ -426,27 +459,27 @@ def main():
         rl_proto_imgs = ae_cls.decode(rl_protos_flat)
     show_and_save_grid(
         images=rl_proto_imgs.cpu(),
-        filename="prototypes_rl_shaped_decoded.png",
+        filename=str(Path(output_dir) / "prototypes_rl_shaped_decoded.png"),
         title="Decoded prototypes (RL-shaped loss schedule, Actor–Critic, fine-tune)",
-        nrow=M_PER_CLASS,
+        nrow=m_per_class,
     )
 
     rl_indices_full = pool_indices[rl_indices_pool]
     rl_imgs = torch.stack([full_train_dataset[i][0] for i in rl_indices_full], dim=0)
     show_and_save_grid(
         images=rl_imgs,
-        filename="rl_selected_real_images.png",
+        filename=str(Path(output_dir) / "rl_selected_real_images.png"),
         title="RL-selected real training images",
-        nrow=SEL_BUDGET_PER_CLASS,
+        nrow=sel_budget_per_class,
     )
 
     rand_indices_full = pool_indices[random_indices_pool]
     rand_imgs = torch.stack([full_train_dataset[i][0] for i in rand_indices_full], dim=0)
     show_and_save_grid(
         images=rand_imgs,
-        filename="random_real_images_subset.png",
+        filename=str(Path(output_dir) / "random_real_images_subset.png"),
         title="Random real training images (same budget)",
-        nrow=SEL_BUDGET_PER_CLASS,
+        nrow=sel_budget_per_class,
     )
 
     visualize_tsne_all(
@@ -456,7 +489,7 @@ def main():
         proto_rl=proto_rl_model,
         rl_indices_pool=rl_indices_pool,
         num_samples_per_class=200,
-        filename="tsne_all_rl_dd.png",
+        filename=str(Path(output_dir) / "tsne_all_rl_dd.png"),
     )
 
     print("\n==================== SUMMARY (Latent + RL + DD, Actor–Critic fine-tune) ====================")
@@ -470,26 +503,26 @@ def main():
     experiment_config = metadata.as_dict()
     experiment_config.update(
         {
-            "ae": {"latent_dim": AE_LATENT_DIM, "epochs": AE_EPOCHS},
+            "ae": {"latent_dim": latent_dim_cfg, "epochs": ae_epochs},
             "prototypes": {
-                "m_per_class": M_PER_CLASS,
-                "baseline_steps": PROTO_STEPS_BASE,
-                "rl_steps_per_episode": PROTO_STEPS_RL_EPISODE,
-                "lambda_real": 1.0,
-                "lambda_div": 0.5,
+                "m_per_class": m_per_class,
+                "baseline_steps": proto_steps_base,
+                "rl_steps_per_episode": proto_steps_rl_episode,
+                "lambda_real": BASE_LAMBDA_REAL,
+                "lambda_div": BASE_LAMBDA_DIV,
             },
             "selection": {
-                "budget_per_class": SEL_BUDGET_PER_CLASS,
-                "episodes": SEL_EPISODES,
-                "gamma": SEL_GAMMA,
-                "lr": SEL_LR,
+                "budget_per_class": sel_budget_per_class,
+                "episodes": sel_episodes,
+                "gamma": sel_gamma,
+                "lr": sel_lr,
                 "reward_epochs": CLASSIFIER_EPOCHS_RL_REWARD,
             },
             "proto_rl": {
-                "episodes": PROTO_RL_EPISODES,
-                "gamma": PROTO_RL_GAMMA,
-                "lr": PROTO_RL_LR,
-                "critic_weight": CRITIC_WEIGHT,
+                "episodes": proto_rl_episodes,
+                "gamma": proto_rl_gamma,
+                "lr": proto_rl_lr,
+                "critic_weight": critic_weight,
             },
             "classifier_epochs_eval": CLASSIFIER_EPOCHS_EVAL,
             "train_pool_size": int(train_z_pool.size(0)),
@@ -505,11 +538,24 @@ def main():
         "rl_proto_acc": float(rl_proto_acc),
     }
 
-    output_dir = prepare_output_dir(args.results_dir, args.dataset, args.backbone)
+    distillation_artifacts_path = Path(output_dir) / "distillation_artifacts.pt"
+    torch.save(
+        {
+            "rl_selected_indices_full": rl_indices_full,
+            "rl_selected_latents": rl_subset_z.cpu(),
+            "rl_selected_labels": rl_subset_y.cpu(),
+            "baseline_proto_state": proto_base.state_dict(),
+            "rl_proto_state": proto_rl_model.state_dict(),
+        },
+        distillation_artifacts_path,
+    )
+
+    print(f"Saved distilled data bundle to {distillation_artifacts_path}")
+
     report_path = save_experiment_report(
         output_dir=output_dir,
         config=experiment_config,
-        metrics=experiment_metrics,
+        metrics={**experiment_metrics, "distillation_artifacts": str(distillation_artifacts_path)},
         notes="Single-run summary generated from main.py",
     )
     print(f"\nStructured experiment report saved to: {report_path}")
