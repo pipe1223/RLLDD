@@ -24,4 +24,22 @@ The aim is to study whether **RL can help shape synthetic prototypes** in a late
 
 This gives you a full experimental pipeline for **latent + RL + dataset distillation (DD)**.
 
+### Reproducibility
+
+- All runs now enable deterministic PyTorch flags via `set_seed`, which also seeds NumPy and CUDA RNGs.
+- A structured JSON report (`results/experiment_summary.json`) is written at the end of `main.py` runs, capturing the full configuration snapshot and core metrics for transparent, publication-grade tracking.
+
+### Backbone and dataset choices
+
+`main.py` now accepts CLI flags so you can swap in stronger encoders or different datasets without editing code:
+
+```
+python RL_latentDD/main.py --dataset cifar100 --backbone resnet18
+python RL_latentDD/main.py --dataset custom --custom-train-dir /path/to/train --custom-test-dir /path/to/test --backbone vit_b_16
+```
+
+- `--dataset` supports `cifar10`, `cifar100`, or `custom` (ImageFolder directories).
+- `--backbone` supports the original `conv` autoencoder, `resnet18`, or `vit_b_16` for stronger latent encoders.
+- For custom datasets, optional `--override-image-size` lets you control the resize applied during preprocessing.
+
 ---

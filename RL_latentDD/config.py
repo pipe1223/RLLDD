@@ -4,7 +4,10 @@ SEED = 0
 AE_LATENT_DIM = 128
 AE_EPOCHS = 12       # can increase for better latent space
 
-NUM_CLASSES = 10
+# Data + model defaults
+DEFAULT_DATASET = "cifar10"  # choices: cifar10, cifar100, custom
+DEFAULT_BACKBONE = "conv"    # choices: conv, resnet18, vit_b_16
+DEFAULT_IMAGE_SIZE = 32       # used for conv; resnet/vit override to ImageNet size
 
 # Distillation / prototypes
 M_PER_CLASS = 10              # prototypes per class
@@ -37,3 +40,6 @@ CLASSIFIER_EPOCHS_EVAL = 40
 
 PRINT_EVERY_SEL = 5
 PRINT_EVERY_PROTO_RL = 5
+
+# I/O
+RESULTS_DIR = "results"
