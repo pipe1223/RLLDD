@@ -42,4 +42,10 @@ python RL_latentDD/main.py --dataset custom --custom-train-dir /path/to/train --
 - `--backbone` supports the original `conv` autoencoder, `resnet18`, or `vit_b_16` for stronger latent encoders.
 - For custom datasets, optional `--override-image-size` lets you control the resize applied during preprocessing.
 
+### Research-grade experiment harness
+
+- All experiment knobs (data split, backbone, loader workers, AE batch size) are captured in structured dataclasses and printed at run start for auditable provenance.
+- Results and artifacts are now organized under `results/<dataset>/<backbone>/` so multiple backbones/datasets can be benchmarked side by side without collisions.
+- Safety checks prevent impossible configurations (e.g., too-small training splits or selection budgets larger than the latent pool), surfacing actionable errors instead of silent failures.
+
 ---
