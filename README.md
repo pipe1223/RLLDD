@@ -1,4 +1,4 @@
-# Latent-Space Dataset Distillation with Reinforcement Learning
+# RL-guided distilled dataset parametrization in latent feature space.
 
 This project explores **dataset distillation in latent space** combined with **reinforcement learning (RL)**.  
 The aim is to study whether **RL can help shape synthetic prototypes** in a latent feature space to match or beat strong baselines.
