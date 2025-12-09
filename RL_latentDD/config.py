@@ -8,28 +8,28 @@ AE_EPOCHS = 12       # can increase for better latent space
 DEFAULT_DATASET = "cifar10"  # choices: cifar10, cifar100, custom
 DEFAULT_BACKBONE = "conv"    # choices: conv, resnet18, vit_b_16
 DEFAULT_IMAGE_SIZE = 32       # used for conv; resnet/vit override to ImageNet size
-DEFAULT_AE_BATCH_SIZE = 256
+DEFAULT_AE_BATCH_SIZE = 128
 DEFAULT_NUM_WORKERS = 4
 
 # Distillation / prototypes
 M_PER_CLASS = 10              # prototypes per class
 BASE_LAMBDA_REAL = 1.0        # real-data loss weight (baseline & RL base)
 BASE_LAMBDA_DIV = 0.5         # diversity loss weight (baseline & RL base)
-PROTO_STEPS_BASE = 350        # steps for baseline prototypes
-PROTO_STEPS_RL_EPISODE = 80   # steps per RL episode for RL fine-tuning
+PROTO_STEPS_BASE = 500        # steps for baseline prototypes
+PROTO_STEPS_RL_EPISODE = 120   # steps per RL episode for RL fine-tuning
 
-BATCH_SIZE_REAL_BASE = 256    # real batch size for baseline proto training
-BATCH_SIZE_REAL_RL = 128      # real batch size for RL-driven proto training
+BATCH_SIZE_REAL_BASE = 128    # real batch size for baseline proto training
+BATCH_SIZE_REAL_RL = 64      # real batch size for RL-driven proto training
 
 # RL for selection (subset)
 SEL_BUDGET_PER_CLASS = 10     # per-class budget (for random, RL-selected, k-means, etc.)
-SEL_EPISODES = 40
+SEL_EPISODES = 60
 SEL_GAMMA = 1.0
 SEL_LR = 1e-4
-CLASSIFIER_EPOCHS_RL_REWARD = 15
+CLASSIFIER_EPOCHS_RL_REWARD = 30
 
 # RL for prototype shaping (Actor–Critic)
-PROTO_RL_EPISODES = 60
+PROTO_RL_EPISODES = 80
 PROTO_RL_GAMMA = 1.0
 PROTO_RL_LR = 1e-4
 CRITIC_WEIGHT = 0.5
@@ -38,7 +38,7 @@ CRITIC_WEIGHT = 0.5
 MAX_TRAIN_POINTS = 20000      # subsample training latents for speed
 
 # Classifier training (evaluation)
-CLASSIFIER_EPOCHS_EVAL = 40
+CLASSIFIER_EPOCHS_EVAL = 80
 
 PRINT_EVERY_SEL = 5
 PRINT_EVERY_PROTO_RL = 5
