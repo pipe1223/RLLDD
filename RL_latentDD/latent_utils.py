@@ -17,9 +17,31 @@ def train_ae_classifier(
     epochs: int = 20,
     lr: float = 1e-3,
     alpha_cls: float = 1.0,
+    momentum: float = 0.9,
+    weight_decay: float =5e-4,
+    step_size: int = 30,
+    gamma: float =0.1,
 ):
     model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    
+    #------- Adam optimizer -----
+    #optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    
+    # ----- SGD optimizer -----
+    optimizer = torch.optim.SGD(
+        model.parameters(),
+        lr=lr,
+        momentum=momentum,
+        weight_decay=weight_decay,
+    )
+
+    # ----- StepLR scheduler -----
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer,
+        step_size=step_size,
+        gamma=gamma,
+    )
+    
     recon_criterion = nn.MSELoss()
     cls_criterion = nn.CrossEntropyLoss()
 
@@ -50,7 +72,9 @@ def train_ae_classifier(
 
         avg_recon = total_recon / total_samples
         avg_cls = total_cls / total_samples
-
+        # Step the LR scheduler once per epoch
+        scheduler.step()
+                
         model.eval()
         correct = 0
         total = 0

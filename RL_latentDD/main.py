@@ -188,14 +188,28 @@ def main():
 
     ae_cls = build_backbone(args.backbone, latent_dim_cfg, num_classes, resolved_size)
     print("Training AE+classifier...")
+#    train_ae_classifier(
+#        model=ae_cls,
+#        train_loader=train_loader,
+#        val_loader=val_loader,
+#        device=device,
+#        epochs=ae_epochs,
+#        lr=1e-3,
+#        alpha_cls=1.0,
+#    )
+    
     train_ae_classifier(
         model=ae_cls,
         train_loader=train_loader,
         val_loader=val_loader,
         device=device,
         epochs=ae_epochs,
-        lr=1e-3,
+        lr=0.01,          # SGD learning rate
         alpha_cls=1.0,
+        momentum=0.9,
+        weight_decay=5e-4,
+        step_size=30,     # decay every 30 epochs (tune if you want)
+        gamma=0.1,        # multiply LR by 0.1 at each step
     )
 
     # --- Extract latents ---
