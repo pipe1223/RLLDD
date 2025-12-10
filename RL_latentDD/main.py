@@ -1,4 +1,5 @@
 # main.py
+# -*- coding: cp1252 -*-
 
 import argparse
 from pathlib import Path
