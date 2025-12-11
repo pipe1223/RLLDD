@@ -127,17 +127,25 @@ class ProtoUpdateEnv:
 
     Actions (3 discrete modes):
       0: Balanced
-         λ_real = BASE_LAMBDA_REAL
-         λ_div  = BASE_LAMBDA_DIV
+         ?_real = BASE_LAMBDA_REAL
+         ?_div  = BASE_LAMBDA_DIV
       1: Diversity-heavy
-         λ_real = BASE_LAMBDA_REAL
-         λ_div  = BASE_LAMBDA_DIV * 3
+         ?_real = BASE_LAMBDA_REAL
+         ?_div  = BASE_LAMBDA_DIV * 3
       2: Real-heavy
-         λ_real = BASE_LAMBDA_REAL * 2
-         λ_div  = BASE_LAMBDA_DIV * 0.2
+         ?_real = BASE_LAMBDA_REAL * 2
+         ?_div  = BASE_LAMBDA_DIV * 0.2
 
     Can either start from scratch or fine-tune a given baseline prototype model.
+
+    Optionally, you can provide:
+      - decode_latents_fn: maps latent vectors -> images (e.g. AE.decode),
+      - image_reward_fn: takes decoded images + labels and returns a scalar reward.
+
+    If image_reward_fn is provided, the FINAL episode reward is computed in image space
+    using that function; otherwise we fall back to latent proto-classifier val accuracy.
     """
+
     def __init__(
         self,
         real_z: torch.Tensor,
@@ -155,6 +163,8 @@ class ProtoUpdateEnv:
         base_model_state: dict = None,
         from_scratch: bool = True,
         init_noise_std: float = 0.0,
+        decode_latents_fn=None,
+        image_reward_fn=None,
     ):
         self.real_z = real_z
         self.real_y = real_y
@@ -186,6 +196,10 @@ class ProtoUpdateEnv:
 
         self.val_z_device = self.val_z.to(self.device)
         self.val_y_device = self.val_y.to(self.device)
+
+        # Optional image-space reward components
+        self.decode_latents_fn = decode_latents_fn
+        self.image_reward_fn = image_reward_fn
 
     def reset(self):
         """
@@ -247,16 +261,19 @@ class ProtoUpdateEnv:
 
         self.model.train()
 
+        # Synthetic latent batch from prototypes
         synth_z, synth_y = self.model.get_synthetic_dataset()
         logits_synth = self.model(synth_z)
         loss_synth = self.criterion(logits_synth, synth_y)
 
+        # Real latent batch
         idx = torch.randint(0, self.N, (self.batch_size_real,))
         z_real = self.real_z[idx].to(self.device)
         y_real = self.real_y[idx].to(self.device)
         logits_real = self.model(z_real)
         loss_real = self.criterion(logits_real, y_real)
 
+        # Diversity regularizer
         div_loss = compute_diversity_loss(self.model)
 
         loss = loss_synth + lambda_real * loss_real + lambda_div * div_loss
@@ -269,12 +286,26 @@ class ProtoUpdateEnv:
 
         if self.step_idx >= self.steps_per_episode:
             self.done = True
-            self.model.eval()
-            with torch.no_grad():
-                logits = self.model(self.val_z_device)
-                preds = logits.argmax(dim=1)
-                final_val_acc = (preds == self.val_y_device).float().mean().item()
-            reward = final_val_acc
+
+            # --- Reward computation ---
+            if (self.image_reward_fn is None) or (self.decode_latents_fn is None):
+                # Default: latent proto-classifier val accuracy
+                self.model.eval()
+                with torch.no_grad():
+                    logits = self.model(self.val_z_device)
+                    preds = logits.argmax(dim=1)
+                    final_val_acc = (preds == self.val_y_device).float().mean().item()
+                reward = final_val_acc
+            else:
+                # Image-space reward: decode prototypes, then call external reward fn
+                self.model.eval()
+                with torch.no_grad():
+                    synth_z, synth_y = self.model.get_synthetic_dataset()
+                    synth_z = synth_z.to(self.device)
+                    synth_y = synth_y.to(self.device)
+                    proto_imgs = self.decode_latents_fn(synth_z)
+                reward = float(self.image_reward_fn(proto_imgs, synth_y))
+
             next_state = np.zeros(self.state_dim, dtype=np.float32)
             done = True
         else:

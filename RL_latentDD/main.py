@@ -66,6 +66,7 @@ from latent_utils import (
     evaluate_distilled_prototypes,
 )
 from rl_envs import LatentSelectionEnv, ProtoUpdateEnv
+from image_reward import make_decoded_latent_reward_fn
 from rl_algos import (
     PolicyNet,
     ActorCriticNet,
@@ -103,10 +104,36 @@ def parse_args():
     parser.add_argument("--proto-rl-gamma", type=float, default=PROTO_RL_GAMMA)
     parser.add_argument("--proto-rl-lr", type=float, default=PROTO_RL_LR)
     parser.add_argument("--critic-weight", type=float, default=CRITIC_WEIGHT)
-    parser.add_argument("--ae-batch-size", type=int, default=DEFAULT_AE_BATCH_SIZE, help="Batch size for AE pretraining")
-    parser.add_argument("--num-workers", type=int, default=DEFAULT_NUM_WORKERS, help="DataLoader worker processes")
-    parser.add_argument("--results-dir", type=str, default=RESULTS_DIR, help="Where to store structured reports/artifacts")
+    parser.add_argument(
+        "--proto-reward-mode",
+        type=str,
+        default="latent",
+        choices=["latent", "decoded_ae_head"],
+        help="Reward type for prototype RL: "
+             "'latent' = val acc of proto classifier in latent space (default); "
+             "'decoded_ae_head' = decode prototypes and use frozen AE head (Conv/ResNet/ViT) "
+             "by re-encoding and training a latent linear classifier.",
+    )
+    parser.add_argument(
+        "--ae-batch-size",
+        type=int,
+        default=DEFAULT_AE_BATCH_SIZE,
+        help="Batch size for AE pretraining",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=DEFAULT_NUM_WORKERS,
+        help="DataLoader worker processes",
+    )
+    parser.add_argument(
+        "--results-dir",
+        type=str,
+        default=RESULTS_DIR,
+        help="Where to store structured reports/artifacts",
+    )
     return parser.parse_args()
+
 
 
 def build_backbone(name: str, latent_dim: int, num_classes: int, img_size: int):
@@ -136,6 +163,7 @@ def main():
     critic_weight = args.critic_weight
     ae_epochs = args.ae_epochs
     latent_dim_cfg = args.latent_dim
+    proto_reward_mode = args.proto_reward_mode
 
     data_cfg = DataConfig(
         name=args.dataset,
@@ -376,9 +404,36 @@ def main():
         classifier_epochs=CLASSIFIER_EPOCHS_EVAL,
     )
     print(f"\nBaseline distilled prototypes test acc: {base_proto_acc:.4f}")
+    
+    
+    # --- Build optional image-space reward for prototype RL ---
+    decode_latents_fn = None
+    proto_image_reward_fn = None
 
-    # --- Actor–Critic RL for prototype shaping (fine-tuning baseline) ---
-    print("\nSetting up Actor–Critic RL environment for prototype shaping (fine-tune baseline)...")
+    if proto_reward_mode == "decoded_ae_head":
+        print("\n[Proto RL] Using decoded prototypes + frozen AE head reward (decode -> AE.encode -> latent classifier).")
+
+        # Decode function: latent -> image, always on the correct device
+        decode_latents_fn = lambda z: ae_cls.decode(z.to(device))
+
+        # Reward function: image -> AE.encode -> latent classifier -> val acc
+        proto_image_reward_fn = make_decoded_latent_reward_fn(
+            ae_model=ae_cls,
+            val_z=val_z,
+            val_y=val_y,
+            num_classes=num_classes,
+            device=device,
+            classifier_epochs=CLASSIFIER_EPOCHS_RL_REWARD,
+        )
+    else:
+        print("\n[Proto RL] Using latent proto-classifier reward (no decode in the reward).")
+
+    
+    
+    
+    
+    # --- Actor-Critic RL for prototype shaping (fine-tuning baseline) ---
+    print("\nSetting up Actor-Critic RL environment for prototype shaping (fine-tune baseline)...")
     proto_base_state = proto_base.state_dict()
 
     proto_env = ProtoUpdateEnv(
@@ -397,7 +452,10 @@ def main():
         base_model_state=proto_base_state,
         from_scratch=False,
         init_noise_std=0.01,
+        decode_latents_fn=decode_latents_fn,
+        image_reward_fn=proto_image_reward_fn,
     )
+
     ac_proto = ActorCriticNet(state_dim=proto_env.state_dim, n_actions=3, hidden_dim=64)
 
     print("\nTraining Actor–Critic policy for prototype shaping (fine-tuning baseline)...")
@@ -431,7 +489,10 @@ def main():
         base_model_state=proto_base_state,
         from_scratch=False,
         init_noise_std=0.0,
+        decode_latents_fn=decode_latents_fn,
+        image_reward_fn=proto_image_reward_fn,
     )
+
     proto_rl_model = run_greedy_proto_episode_ac(proto_eval_env, ac_proto, device)
 
     rl_proto_acc = evaluate_distilled_prototypes(

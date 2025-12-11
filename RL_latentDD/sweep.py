@@ -74,7 +74,7 @@ def build_command(
     cmd = [
         sys.executable,
         "-m",
-        "RL_latentDD.main",
+        "main",
         f"--dataset={dataset}",
         f"--backbone={backbone}",
         f"--sel-budget-per-class={budget}",
