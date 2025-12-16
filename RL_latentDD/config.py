@@ -40,6 +40,9 @@ MAX_TRAIN_POINTS = 20000      # subsample training latents for speed
 # Classifier training (evaluation)
 CLASSIFIER_EPOCHS_EVAL = 80
 
+# Cross-model evaluation
+CROSS_EVAL_EPOCHS = 80
+
 PRINT_EVERY_SEL = 5
 PRINT_EVERY_PROTO_RL = 5
 

@@ -35,6 +35,7 @@ from config import (
     CRITIC_WEIGHT,
     MAX_TRAIN_POINTS,
     CLASSIFIER_EPOCHS_EVAL,
+    CROSS_EVAL_EPOCHS,
     PRINT_EVERY_SEL,
     PRINT_EVERY_PROTO_RL,
     RESULTS_DIR,
@@ -67,6 +68,13 @@ from latent_utils import (
 )
 from rl_envs import LatentSelectionEnv, ProtoUpdateEnv
 from image_reward import make_decoded_latent_reward_fn
+from cross_eval import (
+    normalize_imagenet,
+    train_on_synth_and_eval,
+    sample_real_ipc_tensors,
+    reconstruct_images,
+)
+
 from rl_algos import (
     PolicyNet,
     ActorCriticNet,
@@ -114,6 +122,19 @@ def parse_args():
              "'decoded_ae_head' = decode prototypes and use frozen AE head (Conv/ResNet/ViT) "
              "by re-encoding and training a latent linear classifier.",
     )
+    parser.add_argument(
+        "--enable-cross-eval",
+        action="store_true",
+        help="If set, train external eval models (Conv / ResNet / ViT) on decoded prototypes "
+             "and report test accuracy to measure cross-architecture generalization.",
+    )
+    parser.add_argument(
+        "--cross-eval-epochs",
+        type=int,
+        default=CROSS_EVAL_EPOCHS,
+        help="Training epochs for external eval models on distilled data.",
+    )
+    
     parser.add_argument(
         "--ae-batch-size",
         type=int,
@@ -164,6 +185,8 @@ def main():
     ae_epochs = args.ae_epochs
     latent_dim_cfg = args.latent_dim
     proto_reward_mode = args.proto_reward_mode
+    enable_cross_eval = args.enable_cross_eval
+    cross_eval_epochs = args.cross_eval_epochs
 
     data_cfg = DataConfig(
         name=args.dataset,
@@ -196,6 +219,14 @@ def main():
     )
     val_loader = DataLoader(
         val_dataset,
+        batch_size=loader_cfg.batch_size,
+        shuffle=False,
+        num_workers=loader_cfg.num_workers,
+        pin_memory=loader_cfg.pin_memory,
+    )
+    # Test loader (for external cross-evaluation on real images)
+    test_loader = DataLoader(
+        test_dataset,
         batch_size=loader_cfg.batch_size,
         shuffle=False,
         num_workers=loader_cfg.num_workers,
@@ -503,8 +534,130 @@ def main():
         device=device,
         classifier_epochs=CLASSIFIER_EPOCHS_EVAL,
     )
-    print(f"\nRL-shaped distilled prototypes (Actor–Critic, fine-tune) test acc: {rl_proto_acc:.4f}")
+    print(f"\nRL-shaped distilled prototypes (Actor?Critic, fine-tune) test acc: {rl_proto_acc:.4f}")
 
+    # --- Cross-architecture evaluation of decoded prototypes (optional) ---
+    cross_eval_metrics = {}
+
+    if enable_cross_eval:
+        print("\n[Cross-Eval] Evaluating decoded prototypes on external models "
+              "(Conv / ResNet18 / ResNet50 / ViT-B/16)...")
+
+        # Decode prototypes to images (CPU tensors)
+        with torch.no_grad():
+            base_protos_flat = proto_base.protos.detach().view(-1, latent_dim).to(device)
+            base_proto_imgs = ae_cls.decode(base_protos_flat).cpu()  # [C*M, 3, H, W]
+
+            rl_protos_flat = proto_rl_model.protos.detach().view(-1, latent_dim).to(device)
+            rl_proto_imgs = ae_cls.decode(rl_protos_flat).cpu()
+
+        # Labels for both prototype sets
+        proto_labels = torch.arange(num_classes).repeat_interleave(m_per_class)
+
+        # Match preprocessing with the AE backbone's transform.
+        # If we used ResNet / ViT as backbone, ImageNet normalization was applied
+        # to real images; do the same for decoded prototypes.
+        if backbone_cfg.requires_imagenet_norm():
+            print("[Cross-Eval] Applying ImageNet normalization to decoded prototypes.")
+            base_proto_imgs_proc = normalize_imagenet(base_proto_imgs)
+            rl_proto_imgs_proc = normalize_imagenet(rl_proto_imgs)
+        else:
+            base_proto_imgs_proc = base_proto_imgs
+            rl_proto_imgs_proc = rl_proto_imgs
+
+        # Eval model portfolio: a small conv net + ResNet18 + ResNet50 + ViT-B/16
+        eval_model_names = ["conv_small", "resnet18", "resnet50", "vit_b_16"]
+        
+        ipc = m_per_class  # match prototype IPC by default
+        print(f"\n[Cross-Eval/Calib] Sampling REAL {ipc} IPC per class from the training split...")
+
+        real_ipc_imgs, real_ipc_labels = sample_real_ipc_tensors(
+            dataset=train_dataset,  # uses the same preprocessing as training split
+            num_classes=num_classes,
+            ipc=ipc,
+            seed=seed,
+        )
+
+        print("[Cross-Eval/Calib] Computing AE reconstructions for the REAL IPC subset...")
+        real_ipc_recon = reconstruct_images(
+            ae_model=ae_cls,
+            imgs=real_ipc_imgs,
+            device=device,
+            batch_size=128,
+        )
+
+        # Preprocess reconstructions to match test preprocessing
+        if backbone_cfg.requires_imagenet_norm():
+            real_ipc_recon_proc = normalize_imagenet(real_ipc_recon)
+        else:
+            real_ipc_recon_proc = real_ipc_recon
+        
+        
+        for model_name in eval_model_names:
+            print(f"\n[Cross-Eval] Training {model_name} on BASELINE prototypes...")
+            
+            # ---- Calibration: REAL IPC baseline (same IPC as prototypes) ----
+            if model_name in ["conv_small", "resnet18"]:
+                print(f"\n[Cross-Eval/Calib] Training {model_name} on REAL {ipc} IPC...")
+                real_acc = train_on_synth_and_eval(
+                    model_name=model_name,
+                    num_classes=num_classes,
+                    image_size=resolved_size,
+                    train_imgs=real_ipc_imgs,          # already preprocessed by dataset transform
+                    train_labels=real_ipc_labels,
+                    test_loader=test_loader,
+                    device=device,
+                    epochs=cross_eval_epochs,
+                )
+                print(f"[Cross-Eval/Calib] {model_name} REAL {ipc} IPC - test acc: {real_acc:.4f}")
+                cross_eval_metrics[f"real_{ipc}ipc_{model_name}_acc"] = float(real_acc)
+
+                # ---- Calibration: AE reconstruction baseline ----
+                print(f"[Cross-Eval/Calib] Training {model_name} on AE reconstructions of REAL {ipc} IPC...")
+                recon_acc = train_on_synth_and_eval(
+                    model_name=model_name,
+                    num_classes=num_classes,
+                    image_size=resolved_size,
+                    train_imgs=real_ipc_recon_proc,     # recon images normalized if needed
+                    train_labels=real_ipc_labels,
+                    test_loader=test_loader,
+                    device=device,
+                    epochs=cross_eval_epochs,
+                )
+                print(f"[Cross-Eval/Calib] {model_name} AE-RECON {ipc} IPC - test acc: {recon_acc:.4f}")
+                cross_eval_metrics[f"recon_{ipc}ipc_{model_name}_acc"] = float(recon_acc)
+            
+            base_acc = train_on_synth_and_eval(
+                model_name=model_name,
+                num_classes=num_classes,
+                image_size=resolved_size,
+                train_imgs=base_proto_imgs_proc,
+                train_labels=proto_labels,
+                test_loader=test_loader,
+                device=device,
+                epochs=cross_eval_epochs,
+            )
+            print(f"[Cross-Eval] {model_name} on baseline prototypes - test acc: {base_acc:.4f}")
+
+            print(f"[Cross-Eval] Training {model_name} on RL-SHAPED prototypes...")
+            rl_acc = train_on_synth_and_eval(
+                model_name=model_name,
+                num_classes=num_classes,
+                image_size=resolved_size,
+                train_imgs=rl_proto_imgs_proc,
+                train_labels=proto_labels,
+                test_loader=test_loader,
+                device=device,
+                epochs=cross_eval_epochs,
+            )
+            print(f"[Cross-Eval] {model_name} on RL-shaped prototypes - test acc: {rl_acc:.4f}")
+
+            cross_eval_metrics[f"baseline_proto_{model_name}_acc"] = float(base_acc)
+            cross_eval_metrics[f"rl_proto_{model_name}_acc"] = float(rl_acc)
+
+    else:
+        print("\n[Cross-Eval] Skipped (use --enable-cross-eval to evaluate on external models).")
+    
     # --- Visualizations ---
     ae_cls.eval()
 
@@ -562,8 +715,13 @@ def main():
     print(f"k-means centroids test acc:                  {kmeans_acc:.4f}")
     print(f"RL-selected latent subset test acc:          {rl_sel_acc:.4f}")
     print(f"Baseline prototypes (no RL) test acc:        {base_proto_acc:.4f}")
-    print(f"RL-shaped prototypes (Actor–Critic, fine-tune) test acc: {rl_proto_acc:.4f}")
-
+    print(f"RL-shaped prototypes (Actor-Critic, fine-tune) test acc: {rl_proto_acc:.4f}")
+    
+    if cross_eval_metrics:
+        print("\n[Cross-Eval] External model accuracies on decoded prototypes:")
+        for k, v in cross_eval_metrics.items():
+            print(f"  {k}: {v:.4f}")
+    
     experiment_config = metadata.as_dict()
     experiment_config.update(
         {
@@ -601,6 +759,7 @@ def main():
         "baseline_proto_acc": float(base_proto_acc),
         "rl_proto_acc": float(rl_proto_acc),
     }
+    experiment_metrics.update(cross_eval_metrics)
 
     distillation_artifacts_path = Path(output_dir) / "distillation_artifacts.pt"
     torch.save(
