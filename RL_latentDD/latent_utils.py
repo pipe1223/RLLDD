@@ -8,67 +8,132 @@ from torch.utils.data import DataLoader
 
 from models import ConvAEClassifier, LatentLinearClassifier, LatentPrototypeModel
 
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
+def denormalize_imagenet(x: torch.Tensor) -> torch.Tensor:
+    """
+    Undo ImageNet normalization.
+    x: [B,3,H,W] normalized
+    returns: approx [0,1] pixel space (not guaranteed clipped)
+    """
+    mean = torch.tensor(IMAGENET_MEAN, device=x.device).view(1, 3, 1, 1)
+    std = torch.tensor(IMAGENET_STD, device=x.device).view(1, 3, 1, 1)
+    return x * std + mean
 
 def train_ae_classifier(
-    model: ConvAEClassifier,
-    train_loader: DataLoader,
-    val_loader: DataLoader,
-    device: torch.device,
-    epochs: int = 20,
-    lr: float = 1e-3,
-    alpha_cls: float = 1.0,
+    model,
+    train_loader,
+    val_loader,
+    device,
+    epochs=12,
+    lr=1e-3,
+    ae_weight=1.0,
+    alpha_cls=1.0,
+    denorm_recon_target: bool = False,
 ):
+    """
+    Train AE + classifier jointly.
+
+    Key fix for ResNet/ViT backbones:
+      - If your dataset inputs are ImageNet-normalized, your decoder outputs are in [0,1]
+        (Sigmoid). You should NOT compute MSE against normalized inputs.
+      - Set denorm_recon_target=True to compute reconstruction loss against de-normalized
+        pixel targets in [0,1].
+
+    Args:
+        model: AE+CLS model with forward returning (recon, logits, z)
+        train_loader / val_loader: loaders yielding (x, y)
+        device: torch.device
+        epochs: number of epochs
+        lr: learning rate for Adam
+        ae_weight: weight for recon loss
+        alpha_cls: weight for classifier loss
+        denorm_recon_target: if True, undo ImageNet normalization for recon target
+    """
+    import torch
+    import torch.nn as nn
+
+    # ImageNet normalization constants (torchvision default)
+    IMAGENET_MEAN = (0.485, 0.456, 0.406)
+    IMAGENET_STD = (0.229, 0.224, 0.225)
+
+    def denormalize_imagenet(x: torch.Tensor) -> torch.Tensor:
+        """
+        Undo ImageNet normalization.
+        x: [B,3,H,W] normalized
+        returns: approx pixel space [0,1] (clipped)
+        """
+        mean = torch.tensor(IMAGENET_MEAN, device=x.device).view(1, 3, 1, 1)
+        std = torch.tensor(IMAGENET_STD, device=x.device).view(1, 3, 1, 1)
+        return (x * std + mean).clamp(0.0, 1.0)
+
     model.to(device)
+    model.train()
+
+    criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    recon_criterion = nn.MSELoss()
-    cls_criterion = nn.CrossEntropyLoss()
 
     for epoch in range(1, epochs + 1):
+        # ----------- Train -----------
         model.train()
+        total_loss = 0.0
         total_recon = 0.0
         total_cls = 0.0
         total_samples = 0
 
         for x, y in train_loader:
-            x = x.to(device)
-            y = y.to(device)
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
 
-            optimizer.zero_grad()
-            x_recon, logits, _ = model(x)
+            # Reconstruction target
+            if denorm_recon_target:
+                x_target = denormalize_imagenet(x)
+            else:
+                x_target = x
 
-            recon_loss = recon_criterion(x_recon, x)
-            cls_loss = cls_criterion(logits, y)
-            loss = recon_loss + alpha_cls * cls_loss
+            recon, logits, _z = model(x)
 
+            loss_recon = torch.mean((recon - x_target) ** 2)
+            loss_cls = criterion(logits, y)
+            loss = ae_weight * loss_recon + alpha_cls * loss_cls
+
+            optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
 
             bs = x.size(0)
-            total_recon += float(recon_loss.item()) * bs
-            total_cls += float(cls_loss.item()) * bs
+            total_loss += float(loss.item()) * bs
+            total_recon += float(loss_recon.item()) * bs
+            total_cls += float(loss_cls.item()) * bs
             total_samples += bs
 
-        avg_recon = total_recon / total_samples
-        avg_cls = total_cls / total_samples
+        avg_loss = total_loss / max(1, total_samples)
+        avg_recon = total_recon / max(1, total_samples)
+        avg_cls = total_cls / max(1, total_samples)
 
+        # ----------- Validation accuracy -----------
         model.eval()
         correct = 0
         total = 0
         with torch.no_grad():
-            for x_val, y_val in val_loader:
-                x_val = x_val.to(device)
-                y_val = y_val.to(device)
-                _, logits_val, _ = model(x_val)
-                preds = logits_val.argmax(dim=1)
-                correct += int((preds == y_val).sum().item())
-                total += y_val.size(0)
-        val_acc = correct / total if total > 0 else 0.0
+            for x, y in val_loader:
+                x = x.to(device, non_blocking=True)
+                y = y.to(device, non_blocking=True)
+                _recon, logits, _z = model(x)
+                preds = logits.argmax(dim=1)
+                correct += int((preds == y).sum().item())
+                total += x.size(0)
+
+        val_acc = correct / max(1, total)
 
         print(
-            f"[AE+CLS Epoch {epoch:03d}] "
-            f"Recon={avg_recon:.4f} | Cls={avg_cls:.4f} | Val cls acc={val_acc:.4f}"
+            f"[AE+CLS] Epoch {epoch:03d}/{epochs} | "
+            f"loss={avg_loss:.4f} (recon={avg_recon:.4f}, cls={avg_cls:.4f}) | "
+            f"val_acc={val_acc:.4f}"
         )
 
+    return model
 
 def extract_latents(
     model: ConvAEClassifier,

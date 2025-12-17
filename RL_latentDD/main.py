@@ -248,6 +248,16 @@ def main():
 
     ae_cls = build_backbone(args.backbone, latent_dim_cfg, num_classes, resolved_size)
     print("Training AE+classifier...")
+#    train_ae_classifier(
+#        model=ae_cls,
+#        train_loader=train_loader,
+#        val_loader=val_loader,
+#        device=device,
+#        epochs=ae_epochs,
+#        lr=1e-3,
+#        alpha_cls=1.0,
+#    )
+    
     train_ae_classifier(
         model=ae_cls,
         train_loader=train_loader,
@@ -255,7 +265,9 @@ def main():
         device=device,
         epochs=ae_epochs,
         lr=1e-3,
+        ae_weight=1.0,
         alpha_cls=1.0,
+        denorm_recon_target=backbone_cfg.requires_imagenet_norm(),  # <-- key line
     )
 
     # --- Extract latents ---
@@ -575,7 +587,7 @@ def main():
             dataset=train_dataset,  # uses the same preprocessing as training split
             num_classes=num_classes,
             ipc=ipc,
-            seed=seed,
+            seed=args.seed,
         )
 
         print("[Cross-Eval/Calib] Computing AE reconstructions for the REAL IPC subset...")
